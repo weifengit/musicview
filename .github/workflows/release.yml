@@ -1,0 +1,40 @@
+name: Release Windows
+
+# 打 tag（如 v0.1.0）推送后自动构建 Windows 安装包并发布到 GitHub Releases；
+# 也可在 Actions 页面手动触发（用 tauri.conf.json 里的版本号建 release）。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Build and publish (Windows)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # __VERSION__ 会被替换为 tauri.conf.json 的 version
+          tagName: v__VERSION__
+          releaseName: 'MusicView v__VERSION__'
+          releaseBody: 'Windows 安装包：`setup.exe`（NSIS，推荐）或 `.msi`。'
+          releaseDraft: true
+          prerelease: false
