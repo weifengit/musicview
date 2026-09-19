@@ -2,8 +2,9 @@
 
 export const ANALYSIS_SAMPLE_RATE = 22050;
 
-export const WINDOW_SIZE = 4096; // ≈186ms @22050Hz，需覆盖 A0 周期(802 采样)
-export const HOP_SIZE = 256; // ≈11.6ms 时间分辨率
+export const WINDOW_SIZE = 2048; // ≈93ms @22050Hz，对齐 librosa pyin 默认 frame_length
+export const HOP_SIZE = 512; // ≈23.2ms，对齐 librosa 默认 hop
+export const N_FFT = 2048; // STFT 点数（onset 检测）
 
 // 钢琴音域 A0(27.5Hz)–C8(4186Hz)，留有余量
 export const TAU_MIN = Math.floor(ANALYSIS_SAMPLE_RATE / 2000); // 上限 2000Hz

@@ -4,8 +4,8 @@
 
 ## 功能
 
-- **音符识别**：纯前端 Web Audio 解码 + YIN 基频检测（Worker 内运行，不卡 UI），识别音名、起止时间、音量
-- **可视化图表**：X 轴=时间，Y 轴=归一化音量；柱宽=音符时长；12 个音名各一个色相；同音名按音量做同色系深浅渐变；柱上标注音名
+- **音符识别**：纯前端 Web Audio 解码 + onset 驱动分析（Worker 内运行，不卡 UI）：STFT 谱通量 onset 检测（对齐 librosa `delta=0.10, wait=50ms, backtrack`）切分音符 → 段内 YIN 基频中位数定音高 → 段内峰值 dB 定音量；音符无缝衔接，同音重复弹正确切分
+- **可视化图表**：X 轴=时间，Y 轴=峰值音量(dB)；柱宽=音符时长（到下一 onset）；7 个音级族色系（升降音同族，红橙黄绿青蓝紫）；同族按音量做明度渐变（浅=弱→深=强）；柱上标注音名+唱名（如 F#4/升发）；顶部音级图例
 - **图表交互**：滚轮缩放（锚定鼠标）、拖拽 / Shift+滚轮平移、双击回到全局
 - **播放联动**：播放指针（playhead）随音乐前进，与缩放/平移精确适配；指针越界自动翻页跟随；手动缩放/平移后解除跟随，可一键恢复
 - **文件管理**：选择文件夹自动列出音频文件（m4a/mp3/wav/aac/flac/ogg），逐文件生成图表
@@ -37,7 +37,8 @@ npx tsx scripts/test-synth.ts        # Node 端算法回归（合成音频 → Y
 
 ```
 src/
-├── analysis/    纯算法层：YIN 音高检测、音符分段、freq↔MIDI↔音名（不依赖 React）
+├── analysis/    纯算法层（不依赖 React）：fft/onset（STFT 谱通量 + 峰值检测 + 回退）、
+│                yin（基频检测）、segment（onset 驱动音符构建）、pipeline（管线编排）
 ├── audio/       播放引擎（HTMLAudioElement 封装，perf.now 插值平滑时间）
 ├── chart/       双层 Canvas 图表：视口变换、渲染、颜色映射、交互
 ├── files/       文件夹来源抽象（Tauri 适配层）：webSource 已实现，tauriSource 留桩

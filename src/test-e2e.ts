@@ -13,15 +13,18 @@ const SR = 22050;
 function renderTone(pcm: Float32Array, freq: number, start: number, duration: number, amp: number) {
   const s0 = Math.floor(start * SR);
   const s1 = Math.min(pcm.length, Math.floor((start + duration) * SR));
+  const releaseSec = 0.25;
   for (let i = s0; i < s1; i++) {
     const t = (i - s0) / SR;
     const attack = Math.min(1, t / 0.008);
     const decay = Math.exp(-t * 2.2);
+    const tail = (s1 - i) / SR / releaseSec;
+    const release = tail >= 1 ? 1 : 0.5 - 0.5 * Math.cos(Math.PI * Math.max(0, tail));
     const v =
       Math.sin(2 * Math.PI * freq * t) +
       0.6 * Math.sin(2 * Math.PI * freq * 2 * t) +
       0.3 * Math.sin(2 * Math.PI * freq * 3 * t);
-    pcm[i] += amp * attack * decay * v;
+    pcm[i] += amp * attack * decay * release * v;
   }
 }
 
@@ -59,6 +62,9 @@ async function main() {
 
   // 与 Node 测试相同的旋律：C4 D4 E4 C4 C4 G3(+重击)
   const pcm = new Float32Array(Math.ceil(5.0 * SR));
+  for (let i = 0; i < pcm.length; i++) {
+    pcm[i] = (Math.random() * 2 - 1) * 0.0005; // 底噪
+  }
   renderTone(pcm, 261.63, 0.1, 0.5, 0.3); // C4
   renderTone(pcm, 293.66, 0.8, 0.5, 0.55); // D4 更响
   renderTone(pcm, 329.63, 1.5, 0.5, 0.3); // E4
@@ -76,7 +82,7 @@ async function main() {
   const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
   lines.push(`分析完成: ${notes.length} 个音符, 时长 ${durationSec.toFixed(2)}s, 耗时 ${elapsed}s`);
   for (const n of notes) {
-    lines.push(`  ${n.name} start=${n.start.toFixed(2)} dur=${n.duration.toFixed(2)} vel=${n.velocity.toFixed(2)}`);
+    lines.push(`  ${n.name}(${n.solfege}) start=${n.start.toFixed(2)} dur=${n.duration.toFixed(2)} peak=${n.peakDb.toFixed(1)}dB`);
   }
 
   const expected = [60, 62, 64, 60, 60, 55, 55];

@@ -1,7 +1,13 @@
-import { freqToMidi, midiToName } from './music';
+import { freqToMidi, midiToName, midiToSolfege } from './music';
 import type { AnalysisParams, Note } from '../types';
 
-/** 逐帧分析结果（Worker 内部传递） */
+/**
+ * Onset 驱动的音符构建（对齐参考实现 librosa onset_detect + pyin 中位数方案）：
+ * 每个 onset 到下一个 onset 是一个音符段；段内有声帧 f0 中位数 → MIDI；
+ * 音量 = 段内峰值 dB；最后合并同音短碎片。
+ */
+
+/** 逐帧 YIN 结果（worker 内部传递） */
 export interface Frame {
   /** 帧中心时间（秒） */
   t: number;
@@ -10,152 +16,76 @@ export interface Frame {
   rms: number;
 }
 
-interface RawSegment {
-  startIdx: number;
-  endIdx: number; // 含
-  midi: number;
+export interface BuildNotesInput {
+  frames: Frame[];
+  hopSec: number;
+  /** backtrack 后的 onset 帧下标（升序，与 frames 同一帧网格） */
+  onsetIdx: number[];
+  /** 音频总时长（秒） */
+  totalSec: number;
+  /** 取 [t0, t1) 内的峰值 |x| */
+  peakOf: (t0: number, t1: number) => number;
+  params: AnalysisParams;
 }
 
-/** 计算全局 rms 的第 p 百分位（p∈[0,100]） */
-function percentile(values: number[], p: number): number {
+function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
-  return sorted[idx];
+  return sorted[Math.floor(sorted.length / 2)];
 }
 
-/** 对浮点 midi 序列做窗口中值滤波（仅处理 voiced 帧，unvoiced 保持 NaN） */
-function medianSmooth(midis: number[], window: number): number[] {
-  const half = Math.floor(window / 2);
-  const out = new Array<number>(midis.length);
-  for (let i = 0; i < midis.length; i++) {
-    if (Number.isNaN(midis[i])) {
-      out[i] = NaN;
-      continue;
-    }
-    const vals: number[] = [];
-    for (let j = Math.max(0, i - half); j <= Math.min(midis.length - 1, i + half); j++) {
-      if (!Number.isNaN(midis[j])) vals.push(midis[j]);
-    }
-    vals.sort((a, b) => a - b);
-    out[i] = vals.length ? vals[Math.floor(vals.length / 2)] : NaN;
-  }
-  return out;
-}
+export function buildNotes(input: BuildNotesInput): Note[] {
+  const { frames, hopSec, onsetIdx, totalSec, peakOf, params } = input;
+  if (frames.length === 0 || onsetIdx.length === 0) return [];
 
-/**
- * 逐帧音高 → 音符分段。
- * 流程：有声判定 → 中值平滑 → 量化成段 → 合并短空隙 → onset 切分同音重复 →
- *      最短时长过滤 → 孤立八度修正 → 音量归一化。
- */
-export function segmentNotes(frames: Frame[], hopSec: number, params: AnalysisParams): Note[] {
-  if (frames.length === 0) return [];
-
-  // 1) 有声判定：自适应噪音门限（手机 AGC 底噪不可靠，用全局第 10 百分位推算）
-  const allRms = frames.map((f) => f.rms);
-  const gate = Math.max(percentile(allRms, 10) * params.gateFactor, Math.pow(10, -60 / 20));
-  const midiFloat = frames.map((f) =>
-    f.freq !== null && f.clarity >= params.clarityGate && f.rms >= gate
-      ? freqToMidi(f.freq)
-      : NaN,
+  // 有声判定以周期性（清晰度）为主，对齐 pYIN voiced 思路；
+  // 能量仅设纯静音地板，避免密集演奏时自适应门限误杀衰减中的弱音
+  const voiced = frames.map(
+    (f) => f.freq !== null && f.clarity >= params.clarityGate && f.rms >= params.silenceRms,
   );
 
-  // 2) 中值平滑消除单帧八度/半音毛刺
-  const smoothed = medianSmooth(midiFloat, 5);
+  const notes: Note[] = [];
+  for (let i = 0; i < onsetIdx.length; i++) {
+    const f0 = onsetIdx[i];
+    const f1 = i + 1 < onsetIdx.length ? onsetIdx[i + 1] : frames.length;
+    const t0 = f0 * hopSec;
+    const t1 = i + 1 < onsetIdx.length ? f1 * hopSec : totalSec;
 
-  // 3) 量化 + 连续同 MIDI 成段
-  const quantized = smoothed.map((m) => (Number.isNaN(m) ? -1 : Math.round(m)));
-  let segments: RawSegment[] = [];
-  let cur: RawSegment | null = null;
-  for (let i = 0; i < quantized.length; i++) {
-    const m = quantized[i];
-    if (m < 0) {
-      if (cur) segments.push(cur);
-      cur = null;
-    } else if (cur && cur.midi === m && cur.endIdx === i - 1) {
-      cur.endIdx = i;
-    } else {
-      if (cur) segments.push(cur);
-      cur = { startIdx: i, endIdx: i, midi: m };
+    // 段内有声帧 f0 中位数 → 音高
+    const freqs: number[] = [];
+    for (let f = f0; f < Math.min(f1, frames.length); f++) {
+      if (voiced[f]) freqs.push(frames[f].freq!);
     }
-  }
-  if (cur) segments.push(cur);
+    if (freqs.length < params.minVoicedFrames) continue;
 
-  // 4) 同音段短空隙合并（短暂掉帧/衰减）
-  const mergeGapFrames = Math.round(params.mergeGapSec / hopSec);
-  const merged: RawSegment[] = [];
-  for (const seg of segments) {
+    const midi = Math.round(freqToMidi(median(freqs)));
+    const peak = peakOf(t0, t1);
+    const peakDb = 20 * Math.log10(peak + 1e-9);
+
+    notes.push({
+      start: t0,
+      duration: Math.max(t1 - t0, 0.01),
+      midi,
+      name: midiToName(midi),
+      solfege: midiToSolfege(midi),
+      peakDb,
+    });
+  }
+
+  // 合并同音短碎片（onset 误触发产生的小段并回相邻同音段）
+  const merged: Note[] = [];
+  for (const n of notes) {
     const prev = merged[merged.length - 1];
-    if (prev && prev.midi === seg.midi && seg.startIdx - prev.endIdx - 1 <= mergeGapFrames) {
-      prev.endIdx = seg.endIdx;
+    if (
+      prev &&
+      prev.midi === n.midi &&
+      (n.duration < params.mergeFragmentSec || prev.duration < params.mergeFragmentSec)
+    ) {
+      const end = Math.max(prev.start + prev.duration, n.start + n.duration);
+      prev.duration = end - prev.start;
+      prev.peakDb = Math.max(prev.peakDb, n.peakDb);
     } else {
-      merged.push({ ...seg });
+      merged.push({ ...n });
     }
   }
-
-  // 5) Onset 切分：长同音段内能量上升沿处切开（同音重复弹）
-  const refractoryFrames = Math.round(params.onsetRefractorySec / hopSec);
-  const split: RawSegment[] = [];
-  for (const seg of merged) {
-    let segStart = seg.startIdx;
-    let lastOnset = seg.startIdx;
-    for (let i = seg.startIdx + 1; i <= seg.endIdx; i++) {
-      const prev = frames[i - 1].rms;
-      const cur2 = frames[i].rms;
-      if (
-        cur2 > prev * params.onsetRatio &&
-        cur2 > gate * 1.5 &&
-        i - lastOnset >= refractoryFrames
-      ) {
-        split.push({ startIdx: segStart, endIdx: i - 1, midi: seg.midi });
-        segStart = i;
-        lastOnset = i;
-      }
-    }
-    split.push({ startIdx: segStart, endIdx: seg.endIdx, midi: seg.midi });
-  }
-
-  // 6) 最短时长过滤
-  const minFrames = Math.max(1, Math.round(params.minNoteSec / hopSec));
-  let kept = split.filter((s) => s.endIdx - s.startIdx + 1 >= minFrames);
-
-  // 7) 孤立八度修正：比前后邻居恰好 ±12 且更短的段，吸附到邻居音高
-  kept = kept.map((seg, i) => {
-    const prev = kept[i - 1];
-    const next = kept[i + 1];
-    if (!prev || !next) return seg;
-    const len = seg.endIdx - seg.startIdx + 1;
-    const short = len * hopSec < 0.15;
-    if (!short) return seg;
-    if (Math.abs(seg.midi - prev.midi) === 12 && seg.midi - prev.midi === next.midi - seg.midi) {
-      // prev 和 next 同音（如 C4 - C5 - C4 中的 C5 误判）
-      if (prev.midi === next.midi) return { ...seg, midi: prev.midi };
-    }
-    return seg;
-  });
-
-  // 8) 音量：段内 maxRms → dB → 全曲归一化
-  const withRms = kept.map((seg) => {
-    let maxRms = 0;
-    for (let i = seg.startIdx; i <= seg.endIdx; i++) {
-      if (frames[i].rms > maxRms) maxRms = frames[i].rms;
-    }
-    return { seg, maxRms };
-  });
-  const dbs = withRms.map(({ maxRms }) => 20 * Math.log10(Math.max(maxRms, 1e-8)));
-  const minDb = Math.min(...dbs);
-  const maxDb = Math.max(...dbs);
-  const range = Math.max(maxDb - minDb, 1e-6);
-
-  return withRms.map(({ seg }, i) => {
-    const velocity = Math.min(1, Math.max(0.05, (dbs[i] - minDb) / range));
-    const start = frames[seg.startIdx].t - hopSec / 2;
-    const end = frames[seg.endIdx].t + hopSec / 2;
-    return {
-      start: Math.max(0, start),
-      duration: Math.max(hopSec, end - start),
-      midi: seg.midi,
-      name: midiToName(seg.midi),
-      velocity,
-    };
-  });
+  return merged;
 }
