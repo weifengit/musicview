@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>MusicView E2E 测试</title>
+    <style>
+      body { font-family: system-ui, sans-serif; background: #1e1f24; color: #e4e4e8; margin: 16px; }
+      #chart { width: 1000px; height: 300px; background: #26272e; }
+      #result { white-space: pre-wrap; font-size: 13px; margin-top: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>E2E：合成音频 → 解码 → 分析 → 图表</h1>
+    <canvas id="chart"></canvas>
+    <div id="result">分析中…</div>
+    <script type="module" src="/src/test-e2e.ts"></script>
+  </body>
+</html>
