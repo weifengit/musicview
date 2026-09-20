@@ -14,10 +14,11 @@
 
 ## 开发
 
-```bash
-npm install
-npm run dev        # http://localhost:5173
-```
+* [ ]
+  ```bash
+  npm install
+  npm run dev        # http://localhost:5173
+  ```
 
 ## 构建 / 检查
 

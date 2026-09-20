@@ -8,6 +8,12 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# tauri-action 要用 GITHUB_TOKEN 调 API 创建 Release 并上传安装包，
+# 而仓库默认的 token 权限是只读的，不显式声明会报
+# "Resource not accessible by integration"。
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
